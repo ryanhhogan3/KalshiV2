@@ -7,9 +7,12 @@ def main():
     print("Starting the application...")
     if test.test_authentication() == True:
         print("Authentication successful!")
-        print("Generating overview file...")
+        print("Generating overview file and saving snapshot to DB...")
         overview = all_markets.OverviewAllMarkets()
-        overview.create_overview_file()
+        # Still write the JSON file locally (optional)
+        # overview.create_overview_file()
+        # Also persist the same snapshot into Postgres
+        overview.save_overview_to_db()
     else :
         print("Authentication failed.")
 

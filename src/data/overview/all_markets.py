@@ -2,6 +2,10 @@ import requests
 from datetime import datetime, timezone
 import json
 import datetime as dt
+import os
+
+import psycopg2
+from psycopg2.extras import Json
 
 
 
@@ -86,3 +90,54 @@ class OverviewAllMarkets:
 
         with open(f"kalshi_open_markets_{now}.json", "w") as f:
             json.dump(data, f, indent=2)
+
+    def save_overview_to_db(self):
+        """Persist the current overview snapshot into a Postgres table.
+
+        Expects the following environment variables to be set:
+          PGHOST, PGDATABASE, PGUSER, PGPASSWORD, (optional) PGPORT
+
+        And a table like:
+
+          CREATE TABLE kalshi_snapshots (
+              id SERIAL PRIMARY KEY,
+              generated_at TIMESTAMPTZ NOT NULL,
+              market_count INT,
+              event_count INT,
+              series_count INT,
+              payload JSONB NOT NULL
+          );
+        """
+
+        data = self.export_open_markets_json()
+
+        conn = psycopg2.connect(
+            host=os.environ["PGHOST"],
+            dbname=os.environ["PGDATABASE"],
+            user=os.environ["PGUSER"],
+            password=os.environ["PGPASSWORD"],
+            port=os.environ.get("PGPORT", 5432),
+        )
+
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO kalshi_snapshots (
+                        generated_at,
+                        market_count,
+                        event_count,
+                        series_count,
+                        payload
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        data["metadata"]["generated_at"],
+                        data["metadata"]["market_count"],
+                        data["metadata"]["event_count"],
+                        data["metadata"]["series_count"],
+                        Json(data),
+                    ),
+                )
+        finally:
+            conn.close()
