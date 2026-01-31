@@ -1,6 +1,6 @@
 import auth.userAuth as userAuth
 
-
+# core application logic
 def main():
     test = userAuth.UserAuth()
     print("Starting the application...")
