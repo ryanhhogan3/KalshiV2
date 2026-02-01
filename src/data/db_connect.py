@@ -25,6 +25,10 @@ def _get_password_from_secrets_manager(secret_arn: str) -> str:
     before when we used the AWS CLI.
     """
 
+    # Be forgiving of how the env var is written in .env / shell.
+    # Strip whitespace and any stray wrapping quotes.
+    secret_arn = secret_arn.strip().strip('"\'')
+
     # Let AWS SDK resolve credentials from instance metadata / env.
     # Region can come from AWS_REGION or the standard config chain.
     region = os.environ.get("AWS_REGION")
