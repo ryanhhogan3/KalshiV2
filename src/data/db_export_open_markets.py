@@ -2,7 +2,7 @@ import json
 import os
 import socket
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 from src.data.overview.all_markets import OverviewAllMarkets
 from src.data.db_connect import connect
@@ -82,16 +82,17 @@ update kalshi.export_runs set finished_at = now()
 where run_id = %s;
 """
 
-def fetch_open_markets() -> List[Dict[str, Any]]:
-  """Return a flat list of market dicts from Kalshi.
+def iter_open_markets_batches(limit: int = 1000) -> Iterable[List[Dict[str, Any]]]:
+    """Yield pages of open markets from Kalshi.
 
-  Uses OverviewAllMarkets.fetch_all_open_markets(), which already
-  talks to the Kalshi API and returns a list[dict] for each market.
-  """
+    This uses OverviewAllMarkets.iter_open_markets to fetch one page at a
+    time so that callers can process and drop each batch, keeping memory
+    usage bounded.
+    """
 
-  overview = OverviewAllMarkets()
-  markets = overview.fetch_all_open_markets()
-  return markets
+    overview = OverviewAllMarkets()
+    for batch in overview.iter_open_markets(limit=limit):
+        yield batch
 
 
 def _parse_ts(v):
@@ -124,32 +125,48 @@ def main():
     source = os.environ.get("EXPORT_SOURCE", "unknown")  # local|ec2
     host = socket.gethostname()
 
-    print("Starting DB export of open markets...")
-    markets = fetch_open_markets()
-    if not markets:
-        print("No markets returned; exiting.")
-        return
+    print("Starting DB export of open markets (streaming by page)...")
 
-    print("Normalizing rows...")
-    rows = [normalize_market(m) for m in markets]
-    # Hard fail if any ticker is missing
-    missing = [r for r in rows if not r["market_ticker"]]
-    if missing:
-        raise ValueError(f"{len(missing)} rows missing market_ticker")
+    total_rows = 0
 
-    print("Connecting to database and upserting...")
+    print("Connecting to database and upserting in batches...")
     with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(DDL)
+      with conn.cursor() as cur:
+        cur.execute(DDL)
 
-            cur.execute(INSERT_RUN, (source, host, len(rows), f"started {datetime.now(timezone.utc).isoformat()}"))
-            run_id = cur.fetchone()[0]
+        # We don't yet know how many markets we'll see; start with 0
+        # and update n_markets once the streaming export finishes.
+        cur.execute(
+          INSERT_RUN,
+          (source, host, 0, f"started {datetime.now(timezone.utc).isoformat()}"),
+        )
+        run_id = cur.fetchone()[0]
 
-            # Batch upsert
-            cur.executemany(UPSERT, rows)
+        # Stream Kalshi pages and upsert one batch at a time to keep
+        # memory usage low.
+        for batch in iter_open_markets_batches():
+          if not batch:
+            continue
 
-            cur.execute(FINISH_RUN, (run_id,))
-            print(f"OK: upserted {len(rows)} markets, run_id={run_id}")
+          rows = [normalize_market(m) for m in batch]
+
+          # Hard fail if any ticker is missing in this page.
+          missing = [r for r in rows if not r["market_ticker"]]
+          if missing:
+            raise ValueError(
+              f"{len(missing)} rows missing market_ticker in current batch"
+            )
+
+          cur.executemany(UPSERT, rows)
+          total_rows += len(rows)
+          print(f"Upserted batch of {len(rows)} markets (total={total_rows})")
+
+        # Mark the run as finished and update the final market count.
+        cur.execute(
+          "update kalshi.export_runs set n_markets = %s, finished_at = now() where run_id = %s;",
+          (total_rows, run_id),
+        )
+        print(f"OK: upserted {total_rows} markets total, run_id={run_id}")
 
 
 if __name__ == "__main__":
