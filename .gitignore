@@ -6,3 +6,6 @@
 *.pychache
 *.pyc
 *.json
+*.env
+*.env.local
+*.env.production
