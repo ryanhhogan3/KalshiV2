@@ -9,3 +9,4 @@
 *.env
 *.env.local
 *.env.production
+*.helper.md
