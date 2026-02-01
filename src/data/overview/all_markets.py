@@ -15,8 +15,14 @@ class OverviewAllMarkets:
         self.BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 
-    def fetch_all_open_markets(self, limit=1000):
-        markets = []
+    def iter_open_markets(self, limit=1000):
+        """Yield lists of open markets from Kalshi one page at a time.
+
+        This keeps memory usage bounded by only holding one page of
+        results in memory at once. Callers that need *all* markets can
+        still materialize them into a list (see fetch_all_open_markets).
+        """
+
         cursor = None
 
         # Optional rate-limit tuning from env
@@ -50,11 +56,17 @@ class OverviewAllMarkets:
             data = r.json()
 
             batch = data.get("markets", [])
-            markets.extend(batch)
             cursor = data.get("cursor")
 
             page_count += 1
-            print(f"Fetched page {page_count}, +{len(batch)} markets (total={len(markets)})")
+            print(f"Fetched page {page_count}, +{len(batch)} markets")
+
+            if not batch:
+                break
+
+            # Yield this page to the caller so they can process it and
+            # then drop references to keep memory usage low.
+            yield batch
 
             if max_pages and page_count >= max_pages:
                 print(f"Reached KALSHI_MAX_PAGES={max_pages}, stopping early.")
@@ -63,6 +75,18 @@ class OverviewAllMarkets:
             if not cursor:
                 break
 
+
+    def fetch_all_open_markets(self, limit=1000):
+        """Return a full list of all open markets.
+
+        This preserves the old API for callers that really do want the
+        entire dataset in memory (e.g. JSON export), but internally it
+        still iterates page-by-page.
+        """
+
+        markets = []
+        for batch in self.iter_open_markets(limit=limit):
+            markets.extend(batch)
         return markets
 
 
