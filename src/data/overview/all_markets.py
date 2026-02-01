@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 import datetime as dt
 import os
+import time
 
 import psycopg2
 from psycopg2.extras import Json
@@ -18,17 +19,46 @@ class OverviewAllMarkets:
         markets = []
         cursor = None
 
+        # Optional rate-limit tuning from env
+        max_pages = int(os.environ.get("KALSHI_MAX_PAGES", "0"))  # 0 = no cap
+        backoff_base = float(os.environ.get("KALSHI_BACKOFF_BASE", "1.0"))
+        page_count = 0
+        consecutive_429 = 0
+
         while True:
             params = {"status": "open", "limit": limit}
             if cursor:
                 params["cursor"] = cursor
-
+            
             r = requests.get(f"{self.BASE}/markets", params=params, timeout=30)
+
+            # Handle Kalshi rate limits (HTTP 429) with simple backoff
+            if r.status_code == 429:
+                consecutive_429 += 1
+                # Respect server hint if present, else exponential backoff
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    sleep_s = float(retry_after)
+                else:
+                    sleep_s = backoff_base * (2 ** (consecutive_429 - 1))
+                print(f"Got 429 from Kalshi, sleeping {sleep_s:.1f}s before retry...")
+                time.sleep(sleep_s)
+                continue
+
+            consecutive_429 = 0
             r.raise_for_status()
             data = r.json()
 
-            markets.extend(data.get("markets", []))
+            batch = data.get("markets", [])
+            markets.extend(batch)
             cursor = data.get("cursor")
+
+            page_count += 1
+            print(f"Fetched page {page_count}, +{len(batch)} markets (total={len(markets)})")
+
+            if max_pages and page_count >= max_pages:
+                print(f"Reached KALSHI_MAX_PAGES={max_pages}, stopping early.")
+                break
 
             if not cursor:
                 break
