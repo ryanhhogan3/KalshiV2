@@ -3,9 +3,9 @@ import os
 import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, List
-from overview.all_markets import OverviewAllMarkets
 
-from db_connect import connect
+from src.data.overview.all_markets import OverviewAllMarkets
+from src.data.db_connect import connect
 
 DDL = """
 create schema if not exists kalshi;
