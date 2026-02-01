@@ -1,8 +1,8 @@
 import json
 import os
-import subprocess
 from dataclasses import dataclass
 
+import boto3
 import psycopg
 
 
@@ -17,25 +17,28 @@ class DbConfig:
 
 
 def _get_password_from_secrets_manager(secret_arn: str) -> str:
+    """Fetch the DB password from AWS Secrets Manager using boto3.
+
+    This relies on the container having access to AWS credentials
+    (e.g., EC2 instance role) and a region configuration. The secret
+    is expected to be a JSON object with a "password" key, same as
+    before when we used the AWS CLI.
     """
-    Uses AWS CLI credentials on the machine:
-      - Local: your configured AWS profile
-      - EC2: instance role permissions
-    """
-    secret_str = subprocess.check_output(
-        [
-            "aws",
-            "secretsmanager",
-            "get-secret-value",
-            "--secret-id",
-            secret_arn,
-            "--query",
-            "SecretString",
-            "--output",
-            "text",
-        ],
-        text=True,
-    )
+
+    # Let AWS SDK resolve credentials from instance metadata / env.
+    # Region can come from AWS_REGION or the standard config chain.
+    region = os.environ.get("AWS_REGION")
+    if region:
+        client = boto3.client("secretsmanager", region_name=region)
+    else:
+        client = boto3.client("secretsmanager")
+
+    resp = client.get_secret_value(SecretId=secret_arn)
+    secret_str = resp.get("SecretString")
+    if not secret_str and "SecretBinary" in resp:
+        # Fallback if secret is stored as binary
+        secret_str = resp["SecretBinary"].decode("utf-8")
+
     return json.loads(secret_str)["password"]
 
 
