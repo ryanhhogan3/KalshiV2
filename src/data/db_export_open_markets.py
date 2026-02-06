@@ -37,6 +37,20 @@ create table if not exists kalshi.export_runs (
   n_markets integer not null,
   note text null
 );
+ 
+create table if not exists kalshi.open_markets_hist (
+  snap_id bigserial primary key,
+  snap_ts timestamptz not null,
+  run_id bigint not null references kalshi.export_runs(run_id),
+  market_ticker text not null,
+  series_ticker text null,
+  expiration_time timestamptz null,
+  yes_bid integer null,
+  yes_ask integer null,
+  volume integer null,
+  open_interest integer null,
+  updated_at timestamptz not null
+);
 """
 
 UPSERT = """
@@ -162,6 +176,37 @@ def main():
           print(f"Upserted batch of {len(rows)} markets (total={total_rows})")
 
         # Mark the run as finished and update the final market count.
+        cur.execute(
+          """
+          insert into kalshi.open_markets_hist (
+            snap_ts,
+            run_id,
+            market_ticker,
+            series_ticker,
+            expiration_time,
+            yes_bid,
+            yes_ask,
+            volume,
+            open_interest,
+            updated_at
+          )
+          select
+            now(),
+            %s,
+            market_ticker,
+            series_ticker,
+            expiration_time,
+            yes_bid,
+            yes_ask,
+            volume,
+            open_interest,
+            updated_at
+          from kalshi.open_markets
+          where status = 'active';
+          """,
+          (run_id,),
+        )
+
         cur.execute(
           "update kalshi.export_runs set n_markets = %s, finished_at = now() where run_id = %s;",
           (total_rows, run_id),
