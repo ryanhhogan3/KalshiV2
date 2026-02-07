@@ -193,6 +193,7 @@ def normalize_market(m: Dict[str, Any]) -> Dict[str, Any]:
 
 def main():
     source = os.environ.get("EXPORT_SOURCE", "unknown")  # local|ec2
+    print("EXPORTER_VERSION=SNAPSHOTS_V1", __file__)
     host = socket.gethostname()
     snap_ts = datetime.now(timezone.utc)
     enable_market_snap = os.environ.get("ENABLE_MARKET_SNAPSHOT", "0") == "1"
