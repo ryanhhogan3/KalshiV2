@@ -286,7 +286,7 @@ def main():
           )
           print("inserted global snapshot rows:", cur.rowcount)
 
-          # Series-level snapshot for the run.
+          # Series-level snapshot for the run (using event_ticker as the grouping key).
           cur.execute(
             """
             insert into kalshi.market_snapshot_series (
@@ -303,7 +303,7 @@ def main():
             select
               %s as snap_ts,
               %s as run_id,
-              nullif(raw->>'series_ticker','') as series_ticker,
+              nullif(raw->>'event_ticker','') as series_ticker,
               count(*) as n_markets,
               coalesce(sum(volume),0) as total_volume,
               coalesce(sum(open_interest),0) as total_open_interest,
@@ -312,9 +312,9 @@ def main():
               percentile_cont(0.9) within group (order by ((yes_bid + yes_ask)/2.0)) as p90_mid
             from kalshi.open_markets
             where status='active'
-              and nullif(raw->>'series_ticker','') is not null
+              and nullif(raw->>'event_ticker','') is not null
               and yes_bid is not null and yes_ask is not null
-            group by nullif(raw->>'series_ticker','')
+            group by nullif(raw->>'event_ticker','')
             having coalesce(sum(volume),0) > 0
                 or coalesce(sum(open_interest),0) > 0
             on conflict (snap_ts, series_ticker) do nothing;
