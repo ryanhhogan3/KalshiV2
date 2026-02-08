@@ -10,3 +10,4 @@
 *.env.local
 *.env.production
 *.helper.md
+*todo.md
