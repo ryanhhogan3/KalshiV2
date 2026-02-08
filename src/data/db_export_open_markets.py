@@ -330,25 +330,26 @@ def main():
                   and yes_bid is not null and yes_ask is not null
               ),
               pick as (
-                select * from c order by volume desc nulls last limit 20000
+                (select * from c order by volume desc nulls last limit 20000)
                 union
-                select * from c order by open_interest desc nulls last limit 20000
+                (select * from c order by open_interest desc nulls last limit 20000)
                 union
-                select * from c where spread_ticks >= 10 order by spread_ticks desc limit 20000
+                (select * from c where spread_ticks >= 10 order by spread_ticks desc limit 20000)
                 union
-                select * from c where expiration_time is not null and expiration_time <= %s + interval '48 hours' limit 20000
+                (select * from c
+                  where expiration_time is not null
+                    and expiration_time <= %s + interval '48 hours'
+                  order by expiration_time asc
+                  limit 20000)
+              )
+              insert into kalshi.market_snapshot_markets (
+                snap_ts, run_id, market_ticker, series_ticker, expiration_time,
+                yes_bid, yes_ask, volume, open_interest, spread_ticks, mid
               )
               select
                 %s as snap_ts, %s as run_id,
-                market_ticker,
-                series_ticker,
-                expiration_time,
-                yes_bid,
-                yes_ask,
-                volume,
-                open_interest,
-                spread_ticks,
-                mid
+                market_ticker, series_ticker, expiration_time,
+                yes_bid, yes_ask, volume, open_interest, spread_ticks, mid
               from pick
               on conflict (snap_ts, market_ticker) do nothing;
               """,
