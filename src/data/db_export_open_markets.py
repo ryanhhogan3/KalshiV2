@@ -63,11 +63,6 @@ create table if not exists kalshi.market_snapshot_global (
   total_volume bigint not null,
   total_open_interest bigint not null,
   avg_spread_ticks numeric null,
-  p50_spread_ticks numeric null,
-  p90_spread_ticks numeric null,
-  p50_mid numeric null,
-  p10_mid numeric null,
-  p90_mid numeric null,
   n_wide_spread bigint not null
 );
 
@@ -81,8 +76,6 @@ create table if not exists kalshi.market_snapshot_series (
   total_volume bigint not null,
   total_open_interest bigint not null,
   avg_spread_ticks numeric null,
-  p50_mid numeric null,
-  p90_mid numeric null,
   primary key (snap_ts, series_ticker)
 );
 
@@ -252,11 +245,6 @@ def main():
               total_volume,
               total_open_interest,
               avg_spread_ticks,
-              p50_spread_ticks,
-              p90_spread_ticks,
-              p50_mid,
-              p10_mid,
-              p90_mid,
               n_wide_spread
             )
             select
@@ -267,16 +255,6 @@ def main():
               coalesce(sum(volume),0) as total_volume,
               coalesce(sum(open_interest),0) as total_open_interest,
               avg((yes_ask - yes_bid)) filter (where yes_bid is not null and yes_ask is not null) as avg_spread_ticks,
-              percentile_cont(0.5) within group (order by (yes_ask - yes_bid))
-                filter (where yes_bid is not null and yes_ask is not null) as p50_spread_ticks,
-              percentile_cont(0.9) within group (order by (yes_ask - yes_bid))
-                filter (where yes_bid is not null and yes_ask is not null) as p90_spread_ticks,
-              percentile_cont(0.5) within group (order by ((yes_bid + yes_ask)/2.0))
-                filter (where yes_bid is not null and yes_ask is not null) as p50_mid,
-              percentile_cont(0.1) within group (order by ((yes_bid + yes_ask)/2.0))
-                filter (where yes_bid is not null and yes_ask is not null) as p10_mid,
-              percentile_cont(0.9) within group (order by ((yes_bid + yes_ask)/2.0))
-                filter (where yes_bid is not null and yes_ask is not null) as p90_mid,
               count(*) filter (where yes_bid is not null and yes_ask is not null and (yes_ask - yes_bid) >= 10) as n_wide_spread
             from kalshi.open_markets
             where status='active'
@@ -296,9 +274,7 @@ def main():
               n_markets,
               total_volume,
               total_open_interest,
-              avg_spread_ticks,
-              p50_mid,
-              p90_mid
+              avg_spread_ticks
             )
             select
               %s as snap_ts,
@@ -307,9 +283,7 @@ def main():
               count(*) as n_markets,
               coalesce(sum(volume),0) as total_volume,
               coalesce(sum(open_interest),0) as total_open_interest,
-              avg((yes_ask - yes_bid))::numeric as avg_spread_ticks,
-              percentile_cont(0.5) within group (order by ((yes_bid + yes_ask)/2.0)) as p50_mid,
-              percentile_cont(0.9) within group (order by ((yes_bid + yes_ask)/2.0)) as p90_mid
+              avg((yes_ask - yes_bid))::numeric as avg_spread_ticks
             from kalshi.open_markets
             where status='active'
               and nullif(raw->>'event_ticker','') is not null
