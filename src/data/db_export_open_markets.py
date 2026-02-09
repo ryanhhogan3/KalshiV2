@@ -298,63 +298,68 @@ def main():
           print("inserted series snapshot rows:", cur.rowcount)
 
           # Selective per-market snapshots for a bounded set of "interesting" markets.
+          # update the selection criteria as needed to balance value vs. table size. The example below picks:
           if enable_market_snap:
             cur.execute(
-              """
-              insert into kalshi.market_snapshot_markets (
-                snap_ts,
-                run_id,
+            """
+            with c as (
+              select
                 market_ticker,
-                series_ticker,
+                nullif(raw->>'event_ticker','') as series_ticker,
                 expiration_time,
                 yes_bid,
                 yes_ask,
                 volume,
                 open_interest,
-                spread_ticks,
-                mid
-              )
-              with c as (
-                select
-                  market_ticker,
-                  series_ticker,
-                  expiration_time,
-                  yes_bid,
-                  yes_ask,
-                  volume,
-                  open_interest,
-                  (yes_ask - yes_bid) as spread_ticks,
-                  ((yes_bid + yes_ask)/2.0)::numeric as mid
-                from kalshi.open_markets
-                where status='active'
-                  and yes_bid is not null and yes_ask is not null
-              ),
-              pick as (
-                (select * from c order by volume desc nulls last limit 20000)
-                union
-                (select * from c order by open_interest desc nulls last limit 20000)
-                union
-                (select * from c where spread_ticks >= 10 order by spread_ticks desc limit 20000)
-                union
-                (select * from c
-                  where expiration_time is not null
-                    and expiration_time <= %s + interval '48 hours'
-                  order by expiration_time asc
-                  limit 20000)
-              )
-              insert into kalshi.market_snapshot_markets (
-                snap_ts, run_id, market_ticker, series_ticker, expiration_time,
-                yes_bid, yes_ask, volume, open_interest, spread_ticks, mid
-              )
-              select
-                %s as snap_ts, %s as run_id,
-                market_ticker, series_ticker, expiration_time,
-                yes_bid, yes_ask, volume, open_interest, spread_ticks, mid
-              from pick
-              on conflict (snap_ts, market_ticker) do nothing;
-              """,
-              (snap_ts, snap_ts, run_id),
+                (yes_ask - yes_bid) as spread_ticks,
+                ((yes_bid + yes_ask)/2.0)::numeric as mid
+              from kalshi.open_markets
+              where status='active'
+                and yes_bid is not null and yes_ask is not null
+            ),
+            pick as (
+              (select * from c order by volume desc nulls last limit 20000)
+              union
+              (select * from c order by open_interest desc nulls last limit 20000)
+              union
+              (select * from c where spread_ticks >= 10 order by spread_ticks desc limit 20000)
+              union
+              (select * from c
+                where expiration_time is not null
+                  and expiration_time <= %s + interval '48 hours'
+                order by expiration_time asc
+                limit 20000)
             )
+            insert into kalshi.market_snapshot_markets (
+              snap_ts,
+              run_id,
+              market_ticker,
+              series_ticker,
+              expiration_time,
+              yes_bid,
+              yes_ask,
+              volume,
+              open_interest,
+              spread_ticks,
+              mid
+            )
+            select
+              %s as snap_ts,
+              %s as run_id,
+              market_ticker,
+              series_ticker,
+              expiration_time,
+              yes_bid,
+              yes_ask,
+              volume,
+              open_interest,
+              spread_ticks,
+              mid
+            from pick
+            on conflict (snap_ts, market_ticker) do nothing;
+            """,
+            (snap_ts, snap_ts, run_id),
+          )
             print("inserted market snapshot rows:", cur.rowcount)
         except Exception as e:
           print("Error during snapshot export:", e)
