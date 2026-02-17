@@ -44,18 +44,23 @@ def _get_creds():
 
     global _creds
     if _creds is None:
+        sslmode = os.environ.get("DB_SSLMODE", "disable").lower()
         _creds = {
             "host": os.environ.get("DB_HOST", "127.0.0.1"),
             "port": int(os.environ.get("DB_PORT", "5432")),
             "database": os.environ.get("DB_NAME", "shift"),
             "user": os.environ.get("DB_USER", "shift_user"),
             "password": os.environ["DB_PASS"],
+            "sslmode": sslmode,
         }
     return _creds
 
 def _get_conn():
     global _conn
     c = _get_creds()
+
+    sslmode = c.get("sslmode", "disable").lower()
+    use_ssl = sslmode in ("require", "verify-ca", "verify-full")
     
     # Check if connection is actually alive
     if _conn is not None:
@@ -71,15 +76,25 @@ def _get_conn():
             _conn = None
 
     if _conn is None:
-        _conn = pg8000.native.Connection(
-            user=c["user"],
-            password=c["password"],
-            host=c["host"],
-            port=c["port"],
-            database=c["database"],
-            ssl_context=True,
-            timeout=30, # pg8000 internal socket timeout
-        )
+        if use_ssl:
+            _conn = pg8000.native.Connection(
+                user=c["user"],
+                password=c["password"],
+                host=c["host"],
+                port=c["port"],
+                database=c["database"],
+                ssl_context=True,
+                timeout=30, # pg8000 internal socket timeout
+            )
+        else:
+            _conn = pg8000.native.Connection(
+                user=c["user"],
+                password=c["password"],
+                host=c["host"],
+                port=c["port"],
+                database=c["database"],
+                timeout=30, # pg8000 internal socket timeout
+            )
     return _conn
 
 def _fetch_tradability_raw(scan=5000):
