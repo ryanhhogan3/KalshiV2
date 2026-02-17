@@ -1,101 +1,40 @@
 import math
-import os, json
-import pg8000.native
+from typing import Any, Dict
 
-_creds = None
-_conn = None
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from src.data.db_connect import connect
 
-ALLOWED_ORIGINS = {
+
+ALLOWED_ORIGINS = [
     "https://predictionshift.com",
     "http://localhost:5173",
     "http://localhost:3000",
-}
+]
 
-def _get_origin(event):
-    h = event.get("headers") or {}
-    # API Gateway/Lambda URLs sometimes vary casing
-    return h.get("origin") or h.get("Origin")
 
-def _resp(code, body, event=None, cors=True):
-    headers = {"content-type": "application/json"}
+app = FastAPI(title="Kalshi Analytics API", version="1.0.0")
 
-    if cors and event is not None:
-        origin = _get_origin(event)
-        if origin in ALLOWED_ORIGINS:
-            headers.update({
-                "access-control-allow-origin": origin,
-                "access-control-allow-headers": "content-type",
-                "access-control-allow-methods": "GET,OPTIONS",
-                "vary": "Origin",
-            })
-        else:
-            # No ACAO header if origin not allowed
-            # (browser will block, which is what you want)
-            pass
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+ 
+def _run_query(sql: str):
+    """Execute a read-only SQL query using psycopg via db_connect.connect.
 
-    return {"statusCode": code, "headers": headers, "body": json.dumps(body, default=str)}
-
-def _get_creds():
-    """Return DB credentials from environment variables.
-
-    Expected env vars:
-      DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+    Returns a list of row tuples.
     """
 
-    global _creds
-    if _creds is None:
-        sslmode = os.environ.get("DB_SSLMODE", "disable").lower()
-        _creds = {
-            "host": os.environ.get("DB_HOST", "127.0.0.1"),
-            "port": int(os.environ.get("DB_PORT", "5432")),
-            "database": os.environ.get("DB_NAME", "shift"),
-            "user": os.environ.get("DB_USER", "shift_user"),
-            "password": os.environ["DB_PASS"],
-            "sslmode": sslmode,
-        }
-    return _creds
-
-def _get_conn():
-    global _conn
-    c = _get_creds()
-
-    sslmode = c.get("sslmode", "disable").lower()
-    use_ssl = sslmode in ("require", "verify-ca", "verify-full")
-    
-    # Check if connection is actually alive
-    if _conn is not None:
-        try:
-            # Quick "ping" to verify the socket
-            _conn.run("SELECT 1")
-        except Exception:
-            print("Connection dead. Cleaning up...")
-            try:
-                _conn.close()
-            except:
-                pass
-            _conn = None
-
-    if _conn is None:
-        if use_ssl:
-            _conn = pg8000.native.Connection(
-                user=c["user"],
-                password=c["password"],
-                host=c["host"],
-                port=c["port"],
-                database=c["database"],
-                ssl_context=True,
-                timeout=30, # pg8000 internal socket timeout
-            )
-        else:
-            _conn = pg8000.native.Connection(
-                user=c["user"],
-                password=c["password"],
-                host=c["host"],
-                port=c["port"],
-                database=c["database"],
-                timeout=30, # pg8000 internal socket timeout
-            )
-    return _conn
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            if cur.description:
+                return cur.fetchall()
+            return []
 
 def _fetch_tradability_raw(scan=5000):
     scan = max(1, min(int(scan), 20000))
@@ -108,7 +47,7 @@ def _fetch_tradability_raw(scan=5000):
         ORDER BY updated_at DESC
         LIMIT {scan}
     """
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = ["market_ticker","title","volume","open_interest","yes_bid","yes_ask","updated_at"]
     return [dict(zip(cols, r)) for r in rows]
 
@@ -160,7 +99,7 @@ def _query_export_runs(limit=20):
         ORDER BY run_id DESC
         LIMIT {limit}
     """
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = ["run_id","started_at","finished_at","source","host","n_markets","note"]
     return [dict(zip(cols, r)) for r in rows]
 
@@ -175,7 +114,7 @@ def _fetch_all_active_raw(scan=5000):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = ["ticker", "title", "yes_bid", "yes_ask", "volume", "oi", "updated_at"]
     return [dict(zip(cols, r)) for r in rows]
 
@@ -329,24 +268,18 @@ def query_open_markets(limit=25):
         LIMIT {limit}
     """
     
-    try:
-        rows = _get_conn().run(sql)
-        cols = ["market_ticker", "title", "status", "volume", "updated_at"]
-        
-        result = []
-        for r in rows:
-            d = dict(zip(cols, r))
-            # Safe conversion for JSON serialization
-            if d['updated_at']:
-                d['updated_at'] = d['updated_at'].isoformat()
-            # Ensure volume is a float/int for the frontend
-            d['volume'] = float(d['volume']) if d['volume'] is not None else 0
-            result.append(d)
-                
-        return result
-    except Exception as e:
-        print(f"Error: {e}")
-        return []
+    rows = _run_query(sql)
+    cols = ["market_ticker", "title", "status", "volume", "updated_at"]
+
+    result: list[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        if d["updated_at"]:
+            d["updated_at"] = d["updated_at"].isoformat()
+        d["volume"] = float(d["volume"]) if d["volume"] is not None else 0
+        result.append(d)
+
+    return result
 
 
 def _query_top_events_by_open_interest(limit=50):
@@ -370,7 +303,7 @@ def _query_top_events_by_open_interest(limit=50):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = [
         "event_ticker",
         "n_markets",
@@ -410,7 +343,7 @@ def _query_top_events_by_volume(limit=50):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = [
         "event_ticker",
         "n_markets",
@@ -462,7 +395,7 @@ def _query_global_6h_deltas(limit=9):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = [
         "snap_ts",
         "d_volume_6h",
@@ -536,7 +469,7 @@ def _query_market_movers(limit=100, min_diff=25):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = ["market_ticker", "old_price", "new_price", "price_diff"]
     out = []
     for r in rows:
@@ -598,7 +531,7 @@ def _query_spread_blowouts(hours=24, limit=100):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = [
         "market_ticker",
         "event_ticker",
@@ -645,7 +578,7 @@ def _query_expiring_markets(hours=48, limit=50):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = [
         "market_ticker",
         "event_ticker",
@@ -719,7 +652,7 @@ def _query_mid_moves(hours=24, limit=100):
         LIMIT {limit}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
     cols = [
         "market_ticker",
         "title",
@@ -830,7 +763,7 @@ def _query_global_vol_index(points=50, min_open_interest=100):
         LIMIT {points}
     """
 
-    rows = _get_conn().run(sql)
+    rows = _run_query(sql)
 
     # Annualisation: treat each rv as variance over dt_hours, scale to a
     # 1-year horizon (using 365 days) and take sqrt.
@@ -870,266 +803,171 @@ def _query_global_vol_index(points=50, min_open_interest=100):
     }
 
 
-def lambda_handler(event, context):
-    path = event.get("rawPath") or event.get("path") or "/"
-    method = event.get("requestContext", {}).get("http", {}).get("method") or event.get("httpMethod", "GET")
-
-    # CORS preflight
-    if method == "OPTIONS":
-        return _resp(200, {"ok": True},event=event)
-    
-        # Root: list available endpoints and what they return
-    if path == "/":
-        return _resp(200, {
-            "endpoints": {
-                "/health": {
-                    "description": "Simple health check for the API",
-                    "returns": {"status": "up"}
-                },
-                "/export-runs": {
-                    "aliases": ["/export_runs"],
-                    "description": "Recent export run metadata ordered by most recent run_id",
-                    "query_params": {
-                        "limit": "Optional. Max number of runs to return (default 20, max 100)."
-                    }
-                },
-                "/active-markets": {
-                    "aliases": ["/active_markets"],
-                    "description": "Active markets with non-zero volume ordered by most recent update",
-                    "query_params": {
-                        "limit": "Optional. Max number of markets to return (default 20, max 100)."
-                    }
-                },
-                "/opportunity-gap": {
-                    "aliases": ["/opportunity_gap"],
-                    "description": "Active markets ranked by bid/ask spread percentage (Python computed).",
-                    "query_params": {
-                        "limit": "Optional. Max number of markets to return (default 20).",
-                        "scan": "Optional. Number of recent active markets to scan before ranking (default 1000, max 5000)."
-                    }
-                },
-                "/market-heat": {
-                    "aliases": ["/market_heat"],
-                    "description": "Active markets ranked by churn rate (volume / open interest).",
-                    "query_params": {
-                        "limit": "Optional. Max number of markets to return (default 20).",
-                        "scan": "Optional. Number of recent active markets to scan before ranking (default 1000, max 5000)."
-                    }
-                },
-                "/markets/screener": {
-                    "aliases": ["/markets/screener"],
-                    "description": "Simple read-only market screener over recent active markets.",
-                    "query_params": {
-                        "limit": "Optional. Max number of markets to return (default 50, max 200).",
-                        "scan": "Optional. Number of recent active markets to scan before screening (default 2000, max 5000).",
-                        "min_volume": "Optional. Minimum traded volume to include a market.",
-                        "min_open_interest": "Optional. Minimum open interest to include a market.",
-                        "max_spread_ticks": "Optional. Maximum bid/ask spread in ticks to include a market.",
-                        "sort_by": "Optional. One of tradability_score (default), spread_ticks, volume, open_interest, churn_rate."
-                    }
-                },
-                "/tradeability-score": {
-                    "aliases": ["/tradability_score"],
-                    "description": "Active markets ranked by custom tradability score based on volume, open interest, and spread.",
-                    "query_params": {
-                        "limit": "Optional. Max number of markets to return (default 20, max 200).",
-                        "scan": "Optional. Number of recent active markets to scan before ranking (default 5000, max 20000).",
-                        "min_spread_ticks": "Optional. Minimum bid/ask spread in ticks to include a market (default 1)."
-                    }
-                },
-                "/top-events-open-interest": {
-                    "aliases": ["/top_events_open_interest"],
-                    "description": "Top events (series) ranked by total open interest at the latest snapshot.",
-                    "query_params": {
-                        "limit": "Optional. Max number of events to return (default 50, max 200)."
-                    }
-                },
-                "/top-events-volume": {
-                    "aliases": ["/top_events_volume"],
-                    "description": "Top events (series) ranked by total volume at the latest snapshot.",
-                    "query_params": {
-                        "limit": "Optional. Max number of events to return (default 50, max 200)."
-                    }
-                },
-                "/global-6h-deltas": {
-                    "aliases": ["/global_6h_deltas"],
-                    "description": "Global 6h deltas for volume, open interest, priced markets, spreads, and wide-spread breadth.",
-                    "query_params": {
-                        "limit": "Optional. Max number of 6h periods to return (default 9, max 200)."
-                    }
-                },
-                "/markets/spread-blowouts": {
-                    "aliases": ["/markets/spread_blowouts"],
-                    "description": "Markets with biggest liquidity deterioration (spread blowouts) over a lookback window.",
-                    "query_params": {
-                        "hours": "Optional. Lookback window in hours (default 24, max 168).",
-                        "limit": "Optional. Max number of markets to return (default 100, max 500)."
-                    }
-                },
-                "/markets/expiring-soon": {
-                    "aliases": ["/markets/expiring_soon"],
-                    "description": "Markets expiring within a configurable lookahead window, ranked by open interest.",
-                    "query_params": {
-                        "hours": "Optional. Lookahead window in hours (default 48, max 336).",
-                        "limit": "Optional. Max number of markets to return (default 50, max 200)."
-                    }
-                },
-                "/markets/mid-moves": {
-                    "aliases": ["/markets/mid_moves"],
-                    "description": "Markets with largest mid-price moves over a lookback window, including spread changes.",
-                    "query_params": {
-                        "hours": "Optional. Lookback window in hours (default 24, max 168).",
-                        "limit": "Optional. Max number of markets to return (default 100, max 500)."
-                    }
-                },
-                "/market-movers": {
-                    "aliases": ["/market_movers"],
-                    "description": "Markets with largest price moves between latest and ~24h-ago snapshots.",
-                    "query_params": {
-                        "limit": "Optional. Max number of markets to return (default 100, max 500).",
-                        "min_diff": "Optional. Minimum absolute price change in ticks to include (default 25)."
-                    }
-                },
-                "/vol/index/global": {
-                    "aliases": ["/vol_index_global"],
-                    "description": "Global realised log-odds volatility index over recent snapshots.",
-                    "query_params": {
-                        "points": "Optional. Number of historical index points to return (default 50, max 200).",
-                        "min_open_interest": "Optional. Minimum open interest filter per market snapshot (default 100)."
-                    }
-                }
-            }
-        },event=event)
+@app.get("/health")
+def health_check() -> Dict[str, str]:
+    return {"status": "up"}
 
 
-    # No DB, no Secrets Manager
-    if path == "/health":
-        return _resp(200, {"status": "up"}, event=event)
+@app.get("/export-runs")
+@app.get("/export_runs", include_in_schema=False)
+def export_runs(limit: int = Query(20, ge=1, le=100)):
+    try:
+        return _query_export_runs(limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"export-runs failed: {e}")
 
-    if path in ("/export-runs", "/export_runs"):
-        qs = event.get("queryStringParameters") or {}
-        data = _query_export_runs(qs.get("limit", 20))
-        return _resp(200, data, event=event)
-    
-    if path in ("/active-markets", "/active_markets"):
-        qs = event.get("queryStringParameters") or {}
-        data = query_open_markets(qs.get("limit", 20))
-        return _resp(200, data, event=event)
-    
-    if path in ("/opportunity-gap", "/opportunity_gap"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_opportunity_gap_python(qs.get("limit", 20), qs.get("scan", 1000))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"opportunity-gap error: {e}")
-            return _resp(500, {"error": "opportunity-gap failed", "detail": str(e)}, event=event)
 
-    if path in ("/market-heat", "/market_heat"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_market_heat_python(qs.get("limit", 20), qs.get("scan", 1000))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"market-heat error: {e}")
-            return _resp(500, {"error": "market-heat failed", "detail": str(e)}, event=event)
+@app.get("/active-markets")
+@app.get("/active_markets", include_in_schema=False)
+def active_markets(limit: int = Query(20, ge=1, le=100)):
+    try:
+        return query_open_markets(limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"active-markets failed: {e}")
 
-    if path in ("/markets/screener",):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_market_screener(
-                limit=qs.get("limit", 250),
-                scan=qs.get("scan", 2000),
-                min_volume=qs.get("min_volume"),
-                min_open_interest=qs.get("min_open_interest"),
-                max_spread_ticks=qs.get("max_spread_ticks"),
-                sort_by=qs.get("sort_by", "tradability_score"),
-            )
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"markets/screener error: {e}")
-            return _resp(500, {"error": "markets/screener failed", "detail": str(e)}, event=event)
-        
-    if path in ("/tradeability-score", "/tradability_score"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_tradability_score(qs.get("limit", 20), qs.get("scan", 1000))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"tradeability-score error: {e}")
-            return _resp(500, {"error": "tradeability-score failed", "detail": str(e)}, event=event)
 
-    if path in ("/top-events-open-interest", "/top_events_open_interest"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_top_events_by_open_interest(qs.get("limit", 50))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"top-events-open-interest error: {e}")
-            return _resp(500, {"error": "top-events-open-interest failed", "detail": str(e)}, event=event)
+@app.get("/opportunity-gap")
+@app.get("/opportunity_gap", include_in_schema=False)
+def opportunity_gap(
+    limit: int = Query(20, ge=1, le=200),
+    scan: int = Query(1000, ge=1, le=20000),
+):
+    try:
+        return _query_opportunity_gap_python(limit, scan)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"opportunity-gap failed: {e}")
 
-    if path in ("/top-events-volume", "/top_events_volume"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_top_events_by_volume(qs.get("limit", 50))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"top-events-volume error: {e}")
-            return _resp(500, {"error": "top-events-volume failed", "detail": str(e)}, event=event)
 
-    if path in ("/global-6h-deltas", "/global_6h_deltas"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_global_6h_deltas(qs.get("limit", 9))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"global-6h-deltas error: {e}")
-            return _resp(500, {"error": "global-6h-deltas failed", "detail": str(e)}, event=event)
+@app.get("/market-heat")
+@app.get("/market_heat", include_in_schema=False)
+def market_heat(
+    limit: int = Query(20, ge=1, le=200),
+    scan: int = Query(1000, ge=1, le=20000),
+):
+    try:
+        return _query_market_heat_python(limit, scan)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"market-heat failed: {e}")
 
-    if path in ("/markets/spread-blowouts", "/markets/spread_blowouts"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_spread_blowouts(qs.get("hours", 24), qs.get("limit", 100))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"markets/spread-blowouts error: {e}")
-            return _resp(500, {"error": "markets/spread-blowouts failed", "detail": str(e)}, event=event)
 
-    if path in ("/markets/expiring-soon", "/markets/expiring_soon"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_expiring_markets(qs.get("hours", 48), qs.get("limit", 50))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"markets/expiring-soon error: {e}")
-            return _resp(500, {"error": "markets/expiring-soon failed", "detail": str(e)}, event=event)
+@app.get("/markets/screener")
+def market_screener(
+    limit: int = Query(50, ge=1, le=200),
+    scan: int = Query(2000, ge=1, le=5000),
+    min_volume: float | None = Query(None),
+    min_open_interest: float | None = Query(None),
+    max_spread_ticks: float | None = Query(None),
+    sort_by: str = Query("tradability_score"),
+):
+    try:
+        return _query_market_screener(
+            limit=limit,
+            scan=scan,
+            min_volume=min_volume,
+            min_open_interest=min_open_interest,
+            max_spread_ticks=max_spread_ticks,
+            sort_by=sort_by,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"markets/screener failed: {e}")
 
-    if path in ("/markets/mid-moves", "/markets/mid_moves"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_mid_moves(qs.get("hours", 24), qs.get("limit", 100))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"markets/mid-moves error: {e}")
-            return _resp(500, {"error": "markets/mid-moves failed", "detail": str(e)}, event=event)
 
-    if path in ("/market-movers", "/market_movers"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_market_movers(qs.get("limit", 100), qs.get("min_diff", 25))
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"market-movers error: {e}")
-            return _resp(500, {"error": "market-movers failed", "detail": str(e)}, event=event)
-    if path in ("/vol/index/global", "/vol_index_global"):
-        qs = event.get("queryStringParameters") or {}
-        try:
-            data = _query_global_vol_index(
-                qs.get("points", 50),
-                qs.get("min_open_interest", 100),
-            )
-            return _resp(200, data, event=event)
-        except Exception as e:
-            print(f"global-vol-index error: {e}")
-            return _resp(500, {"error": "global-vol-index failed", "detail": str(e)}, event=event)
-    return _resp(404, {"error": "not found", "path": path})
+@app.get("/tradeability-score")
+@app.get("/tradability_score", include_in_schema=False)
+def tradability_score(
+    limit: int = Query(20, ge=1, le=200),
+    scan: int = Query(5000, ge=1, le=20000),
+    min_spread_ticks: int = Query(1, ge=1),
+):
+    try:
+        return _query_tradability_score(limit, scan, min_spread_ticks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"tradeability-score failed: {e}")
+
+
+@app.get("/top-events-open-interest")
+@app.get("/top_events_open_interest", include_in_schema=False)
+def top_events_open_interest(limit: int = Query(50, ge=1, le=200)):
+    try:
+        return _query_top_events_by_open_interest(limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"top-events-open-interest failed: {e}")
+
+
+@app.get("/top-events-volume")
+@app.get("/top_events_volume", include_in_schema=False)
+def top_events_volume(limit: int = Query(50, ge=1, le=200)):
+    try:
+        return _query_top_events_by_volume(limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"top-events-volume failed: {e}")
+
+
+@app.get("/global-6h-deltas")
+@app.get("/global_6h_deltas", include_in_schema=False)
+def global_6h_deltas(limit: int = Query(9, ge=1, le=200)):
+    try:
+        return _query_global_6h_deltas(limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"global-6h-deltas failed: {e}")
+
+
+@app.get("/markets/spread-blowouts")
+@app.get("/markets/spread_blowouts", include_in_schema=False)
+def spread_blowouts(
+    hours: int = Query(24, ge=1, le=168),
+    limit: int = Query(100, ge=1, le=500),
+):
+    try:
+        return _query_spread_blowouts(hours, limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"markets/spread-blowouts failed: {e}")
+
+
+@app.get("/markets/expiring-soon")
+@app.get("/markets/expiring_soon", include_in_schema=False)
+def expiring_soon(
+    hours: int = Query(48, ge=1, le=336),
+    limit: int = Query(50, ge=1, le=200),
+):
+    try:
+        return _query_expiring_markets(hours, limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"markets/expiring-soon failed: {e}")
+
+
+@app.get("/markets/mid-moves")
+@app.get("/markets/mid_moves", include_in_schema=False)
+def mid_moves(
+    hours: int = Query(24, ge=1, le=168),
+    limit: int = Query(100, ge=1, le=500),
+):
+    try:
+        return _query_mid_moves(hours, limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"markets/mid-moves failed: {e}")
+
+
+@app.get("/market-movers")
+@app.get("/market_movers", include_in_schema=False)
+def market_movers(
+    limit: int = Query(100, ge=1, le=500),
+    min_diff: int = Query(25, ge=1),
+):
+    try:
+        return _query_market_movers(limit, min_diff)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"market-movers failed: {e}")
+
+
+@app.get("/vol/index/global")
+@app.get("/vol_index_global", include_in_schema=False)
+def vol_index_global(
+    points: int = Query(50, ge=1, le=200),
+    min_open_interest: int = Query(100, ge=0),
+):
+    try:
+        return _query_global_vol_index(points, min_open_interest)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"global-vol-index failed: {e}")
+
