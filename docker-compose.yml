@@ -55,6 +55,28 @@ services:
     networks:
     - shift_net
 
+  kalshi_export:
+    image: kalshiv2:prod
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app
+    command: ["python", "-m", "src.data.db_export_open_markets"]
+    restart: "no"
+    networks:
+      - shift_net
+
+  poly_export:
+    image: kalshiv2:prod
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app
+    command: ["python", "-m", "src.data.db_export_poly_markets"]
+    restart: "no"
+    networks:
+      - shift_net
+
 networks:
   shift_net:
     external: true
