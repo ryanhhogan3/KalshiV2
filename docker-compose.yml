@@ -1,0 +1,42 @@
+services:
+  kalshiv2:
+    build: .
+    container_name: kalshiv2
+    restart: always
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: shift
+      DB_USER: shift_user
+      DB_PASS: change_me_strong_password
+      DB_SSLMODE: disable
+    # If your exporter/auth needs the Kalshi private key, mount it read-only:
+    # (Make sure this file exists on the EC2 host)
+    volumes:
+      - /home/ubuntu/apps/KalshiV2/src/auth/secrets/kalshi_private_key.pem:/app/src/auth/secrets/kalshi_private_key.pem:ro
+    command: ["sleep", "infinity"]
+    networks:
+      - shift_net
+
+  api:
+    build: .
+    container_name: kalshi_scrapper_api
+    restart: always
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: shift
+      DB_USER: shift_user
+      DB_PASS: change_me_strong_password
+      DB_SSLMODE: disable
+      # If you want to override CORS later:
+      # ALLOWED_ORIGINS: "https://predictionshift.com,http://localhost:5173,http://localhost:3000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    command: ["uvicorn", "src.api.kalshi_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks:
+    - shift_net
+
+networks:
+  shift_net:
+    external: true
