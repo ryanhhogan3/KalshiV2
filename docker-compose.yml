@@ -55,6 +55,23 @@ services:
     networks:
     - shift_net
 
+  poly_api:
+    build: .
+    container_name: poly_api
+    restart: always
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: shift
+      DB_USER: shift_user
+      DB_PASS: change_me_strong_password
+      DB_SSLMODE: disable
+    ports:
+      - "127.0.0.1:8001:8001"
+    command: ["uvicorn", "src.api.poly_api:app", "--host", "0.0.0.0", "--port", "8001"]
+    networks:
+      - shift_net
+
   kalshi_export:
     image: kalshiv2:prod
     env_file:
