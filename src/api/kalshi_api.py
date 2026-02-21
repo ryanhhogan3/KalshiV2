@@ -10,6 +10,7 @@ ALLOWED_ORIGINS = [
     "https://predictionshift.com",
     "http://localhost:5173",
     "http://localhost:3000",
+    "https://api.predictionshift.com"
 ]
 
 
