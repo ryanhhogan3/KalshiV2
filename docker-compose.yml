@@ -18,6 +18,24 @@ services:
     networks:
       - shift_net
 
+  polymarket:
+    build: .
+    container_name: polymarket_exporter
+    restart: always
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: shift
+      DB_USER: shift_user
+      DB_PASS: change_me_strong_password
+      DB_SSLMODE: disable
+      EXPORT_SOURCE: ec2
+      # Set to "1" to also write per-market time-series rows
+      ENABLE_MARKET_SNAPSHOT: "0"
+    command: ["sleep", "infinity"]
+    networks:
+      - shift_net
+
   api:
     build: .
     container_name: kalshi_scrapper_api
