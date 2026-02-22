@@ -528,6 +528,107 @@ def _query_mid_moves(hours: int = 24, limit: int = 100):
     return out
 
 
+def _query_top_changes_24h(metric: str = "volume", limit: int = 50, min_prev_value: float = 0.0):
+    """Top markets by absolute 24h change for a selected metric."""
+    limit = max(1, min(int(limit), 500))
+    try:
+        min_prev_value = float(min_prev_value)
+    except Exception:
+        min_prev_value = 0.0
+
+    metric_map = {
+        "volume": "volume",
+        "volume_24hr": "volume_24hr",
+        "liquidity": "liquidity",
+        "outcome_yes_price": "outcome_yes_price",
+        "yes_price": "outcome_yes_price",
+    }
+    metric_key = (metric or "volume").lower()
+    metric_col = metric_map.get(metric_key)
+    if metric_col is None:
+        raise ValueError("Unsupported metric. Use one of: volume, volume_24hr, liquidity, outcome_yes_price")
+
+    sql = f"""
+        WITH snaps AS (
+            SELECT DISTINCT snap_ts FROM polymarket.market_snapshot_markets
+        ),
+        latest AS (
+            SELECT MAX(snap_ts) AS snap_ts FROM snaps
+        ),
+        base AS (
+            SELECT COALESCE(
+                (
+                    SELECT snap_ts
+                    FROM snaps
+                    WHERE snap_ts <= (SELECT snap_ts FROM latest) - INTERVAL '24 hours'
+                    ORDER BY snap_ts DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT snap_ts
+                    FROM snaps
+                    WHERE snap_ts < (SELECT snap_ts FROM latest)
+                    ORDER BY snap_ts DESC
+                    LIMIT 1
+                )
+            ) AS snap_ts
+        )
+        SELECT
+            l.condition_id,
+            om.question,
+            om.category,
+            l.event_id,
+            p.{metric_col} AS prev_value,
+            l.{metric_col} AS current_value,
+            (l.{metric_col} - p.{metric_col}) AS delta_value,
+            CASE
+              WHEN p.{metric_col} = 0 THEN NULL
+              ELSE ((l.{metric_col} - p.{metric_col}) / p.{metric_col}) * 100.0
+            END AS pct_change,
+            (SELECT snap_ts FROM latest) AS latest_snap_ts,
+            (SELECT snap_ts FROM base) AS base_snap_ts
+        FROM polymarket.market_snapshot_markets l
+        JOIN base b ON TRUE
+        JOIN polymarket.market_snapshot_markets p
+          ON p.snap_ts = b.snap_ts
+         AND p.condition_id = l.condition_id
+        LEFT JOIN polymarket.open_markets om
+          ON om.condition_id = l.condition_id
+        WHERE l.snap_ts = (SELECT snap_ts FROM latest)
+          AND p.{metric_col} IS NOT NULL
+          AND l.{metric_col} IS NOT NULL
+          AND ABS(p.{metric_col}) >= {min_prev_value}
+        ORDER BY ABS(l.{metric_col} - p.{metric_col}) DESC
+        LIMIT {limit}
+    """
+
+    rows = _run_query(sql)
+    cols = [
+        "condition_id",
+        "question",
+        "category",
+        "event_id",
+        "prev_value",
+        "current_value",
+        "delta_value",
+        "pct_change",
+        "latest_snap_ts",
+        "base_snap_ts",
+    ]
+    out = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        for k in ("prev_value", "current_value", "delta_value", "pct_change"):
+            if d.get(k) is not None:
+                d[k] = float(d[k])
+        for ts_col in ("latest_snap_ts", "base_snap_ts"):
+            if d.get(ts_col) is not None and hasattr(d[ts_col], "isoformat"):
+                d[ts_col] = d[ts_col].isoformat()
+        d["metric"] = metric_col
+        out.append(d)
+    return out
+
+
 def _query_vol_index_global(points: int = 50, min_liquidity: float = 100.0):
     """
     Polymarket realized volatility index.
@@ -764,6 +865,21 @@ def mid_moves(
         return _query_mid_moves(hours, limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"markets/mid-moves failed: {e}")
+
+
+@app.get("/markets/top-changes-24h")
+@app.get("/markets/top_changes_24h", include_in_schema=False)
+def top_changes_24h(
+    metric: str = Query("volume"),
+    limit: int = Query(50, ge=1, le=500),
+    min_prev_value: float = Query(0.0, ge=0),
+):
+    try:
+        return _query_top_changes_24h(metric=metric, limit=limit, min_prev_value=min_prev_value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"markets/top-changes-24h failed: {e}")
 
 
 @app.get("/vol/index/global")

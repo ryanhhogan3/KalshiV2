@@ -675,6 +675,107 @@ def _query_mid_moves(hours=24, limit=100):
     return out
 
 
+def _query_top_changes_24h(metric="volume", limit=50, min_prev_value=0.0):
+    """Top markets by absolute 24h change for a selected metric."""
+    limit = max(1, min(int(limit), 500))
+    try:
+        min_prev_value = float(min_prev_value)
+    except Exception:
+        min_prev_value = 0.0
+
+    metric_map = {
+        "volume": "volume",
+        "open_interest": "open_interest",
+        "oi": "open_interest",
+        "mid": "mid",
+        "spread_ticks": "spread_ticks",
+        "spread": "spread_ticks",
+    }
+    metric_key = (metric or "volume").lower()
+    metric_col = metric_map.get(metric_key)
+    if metric_col is None:
+        raise ValueError("Unsupported metric. Use one of: volume, open_interest, mid, spread_ticks")
+
+    sql = f"""
+        WITH snaps AS (
+            SELECT DISTINCT snap_ts FROM kalshi.market_snapshot_markets
+        ),
+        latest AS (
+            SELECT MAX(snap_ts) AS snap_ts FROM snaps
+        ),
+        base AS (
+            SELECT COALESCE(
+                (
+                    SELECT snap_ts
+                    FROM snaps
+                    WHERE snap_ts <= (SELECT snap_ts FROM latest) - INTERVAL '24 hours'
+                    ORDER BY snap_ts DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT snap_ts
+                    FROM snaps
+                    WHERE snap_ts < (SELECT snap_ts FROM latest)
+                    ORDER BY snap_ts DESC
+                    LIMIT 1
+                )
+            ) AS snap_ts
+        )
+        SELECT
+            l.market_ticker,
+            om.title,
+            l.series_ticker AS event_ticker,
+            p.{metric_col} AS prev_value,
+            l.{metric_col} AS current_value,
+            (l.{metric_col} - p.{metric_col}) AS delta_value,
+            CASE
+              WHEN p.{metric_col} = 0 THEN NULL
+              ELSE ((l.{metric_col} - p.{metric_col}) / p.{metric_col}) * 100.0
+            END AS pct_change,
+            (SELECT snap_ts FROM latest) AS latest_snap_ts,
+            (SELECT snap_ts FROM base) AS base_snap_ts
+        FROM kalshi.market_snapshot_markets l
+        JOIN base b ON TRUE
+        JOIN kalshi.market_snapshot_markets p
+          ON p.snap_ts = b.snap_ts
+         AND p.market_ticker = l.market_ticker
+        LEFT JOIN kalshi.open_markets om
+          ON om.market_ticker = l.market_ticker
+        WHERE l.snap_ts = (SELECT snap_ts FROM latest)
+          AND p.{metric_col} IS NOT NULL
+          AND l.{metric_col} IS NOT NULL
+          AND ABS(p.{metric_col}) >= {min_prev_value}
+        ORDER BY ABS(l.{metric_col} - p.{metric_col}) DESC
+        LIMIT {limit}
+    """
+
+    rows = _run_query(sql)
+    cols = [
+        "market_ticker",
+        "title",
+        "event_ticker",
+        "prev_value",
+        "current_value",
+        "delta_value",
+        "pct_change",
+        "latest_snap_ts",
+        "base_snap_ts",
+    ]
+
+    out = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        for k in ("prev_value", "current_value", "delta_value", "pct_change"):
+            if d.get(k) is not None:
+                d[k] = float(d[k])
+        for ts_col in ("latest_snap_ts", "base_snap_ts"):
+            if d.get(ts_col) is not None and hasattr(d[ts_col], "isoformat"):
+                d[ts_col] = d[ts_col].isoformat()
+        d["metric"] = metric_col
+        out.append(d)
+    return out
+
+
 def _query_global_vol_index(points=50, min_open_interest=100):
     """Compute a simple global realized log-odds volatility index over recent snapshots.
 
@@ -959,6 +1060,21 @@ def market_movers(
         return _query_market_movers(limit, min_diff)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"market-movers failed: {e}")
+
+
+@app.get("/markets/top-changes-24h")
+@app.get("/markets/top_changes_24h", include_in_schema=False)
+def top_changes_24h(
+    metric: str = Query("volume"),
+    limit: int = Query(50, ge=1, le=500),
+    min_prev_value: float = Query(0.0, ge=0),
+):
+    try:
+        return _query_top_changes_24h(metric=metric, limit=limit, min_prev_value=min_prev_value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"markets/top-changes-24h failed: {e}")
 
 
 @app.get("/vol/index/global")
