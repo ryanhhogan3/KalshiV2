@@ -10,6 +10,7 @@ services:
       DB_USER: shift_user
       DB_PASS: change_me_strong_password
       DB_SSLMODE: disable
+      ENABLE_MARKET_SNAPSHOT: "1"
     # If your exporter/auth needs the Kalshi private key, mount it read-only:
     # (Make sure this file exists on the EC2 host)
     volumes:
