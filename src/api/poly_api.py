@@ -529,7 +529,7 @@ def _query_mid_moves(hours: int = 24, limit: int = 100):
 
 
 def _query_top_changes_24h(metric: str = "volume", limit: int = 50, min_prev_value: float = 0.0):
-    """Top markets by absolute 24h change for a selected metric."""
+    """Top markets by change from oldest->newest snapshot inside the latest 24h window."""
     limit = max(1, min(int(limit), 500))
     try:
         min_prev_value = float(min_prev_value)
@@ -549,29 +549,20 @@ def _query_top_changes_24h(metric: str = "volume", limit: int = 50, min_prev_val
         raise ValueError("Unsupported metric. Use one of: volume, volume_24hr, liquidity, outcome_yes_price")
 
     sql = f"""
-        WITH snaps AS (
-            SELECT DISTINCT snap_ts FROM polymarket.market_snapshot_markets
+        WITH latest AS (
+            SELECT MAX(snap_ts) AS snap_ts
+            FROM polymarket.market_snapshot_markets
         ),
-        latest AS (
-            SELECT MAX(snap_ts) AS snap_ts FROM snaps
+        window_snaps AS (
+            SELECT DISTINCT m.snap_ts
+            FROM polymarket.market_snapshot_markets m
+            JOIN latest l ON TRUE
+            WHERE m.snap_ts >= l.snap_ts - INTERVAL '24 hours'
+              AND m.snap_ts <= l.snap_ts
         ),
         base AS (
-            SELECT COALESCE(
-                (
-                    SELECT snap_ts
-                    FROM snaps
-                    WHERE snap_ts <= (SELECT snap_ts FROM latest) - INTERVAL '24 hours'
-                    ORDER BY snap_ts DESC
-                    LIMIT 1
-                ),
-                (
-                    SELECT snap_ts
-                    FROM snaps
-                    WHERE snap_ts < (SELECT snap_ts FROM latest)
-                    ORDER BY snap_ts DESC
-                    LIMIT 1
-                )
-            ) AS snap_ts
+            SELECT MIN(snap_ts) AS snap_ts
+            FROM window_snaps
         )
         SELECT
             l.condition_id,
@@ -585,8 +576,15 @@ def _query_top_changes_24h(metric: str = "volume", limit: int = 50, min_prev_val
               WHEN p.{metric_col} = 0 THEN NULL
               ELSE ((l.{metric_col} - p.{metric_col}) / p.{metric_col}) * 100.0
             END AS pct_change,
+                        p.volume AS prev_volume,
+                        l.volume AS current_volume,
+                        (l.volume - p.volume) AS d_volume,
+                        NULL::numeric AS prev_open_interest,
+                        NULL::numeric AS current_open_interest,
+                        NULL::numeric AS d_open_interest,
             (SELECT snap_ts FROM latest) AS latest_snap_ts,
-            (SELECT snap_ts FROM base) AS base_snap_ts
+                        (SELECT snap_ts FROM base) AS base_snap_ts,
+                        EXTRACT(EPOCH FROM ((SELECT snap_ts FROM latest) - (SELECT snap_ts FROM base))) / 3600.0 AS window_hours
         FROM polymarket.market_snapshot_markets l
         JOIN base b ON TRUE
         JOIN polymarket.market_snapshot_markets p
@@ -595,10 +593,13 @@ def _query_top_changes_24h(metric: str = "volume", limit: int = 50, min_prev_val
         LEFT JOIN polymarket.open_markets om
           ON om.condition_id = l.condition_id
         WHERE l.snap_ts = (SELECT snap_ts FROM latest)
+                    AND p.snap_ts = (SELECT snap_ts FROM base)
           AND p.{metric_col} IS NOT NULL
           AND l.{metric_col} IS NOT NULL
           AND ABS(p.{metric_col}) >= {min_prev_value}
         ORDER BY ABS(l.{metric_col} - p.{metric_col}) DESC
+                             , ABS(COALESCE(l.volume - p.volume, 0)) DESC
+                             , l.volume DESC NULLS LAST
         LIMIT {limit}
     """
 
@@ -612,13 +613,32 @@ def _query_top_changes_24h(metric: str = "volume", limit: int = 50, min_prev_val
         "current_value",
         "delta_value",
         "pct_change",
+        "prev_volume",
+        "current_volume",
+        "d_volume",
+        "prev_open_interest",
+        "current_open_interest",
+        "d_open_interest",
         "latest_snap_ts",
         "base_snap_ts",
+        "window_hours",
     ]
     out = []
     for r in rows:
         d = dict(zip(cols, r))
-        for k in ("prev_value", "current_value", "delta_value", "pct_change"):
+        for k in (
+            "prev_value",
+            "current_value",
+            "delta_value",
+            "pct_change",
+            "prev_volume",
+            "current_volume",
+            "d_volume",
+            "prev_open_interest",
+            "current_open_interest",
+            "d_open_interest",
+            "window_hours",
+        ):
             if d.get(k) is not None:
                 d[k] = float(d[k])
         for ts_col in ("latest_snap_ts", "base_snap_ts"):
@@ -871,7 +891,7 @@ def mid_moves(
 @app.get("/markets/top_changes_24h", include_in_schema=False)
 def top_changes_24h(
     metric: str = Query("volume"),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(10, ge=1, le=500),
     min_prev_value: float = Query(0.0, ge=0),
 ):
     try:
