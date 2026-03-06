@@ -27,6 +27,9 @@ from typing import Any, Dict, List, Optional
 
 from src.data.db_connect import connect
 from src.data.poly.poly_fetch import iter_flat_market_batches
+from src.data.refresh_poly_move_stats import refresh_poly_move_stats
+from src.data.alerts import evaluate_alerts
+from src.data.alert_email import send_triggered_alerts
 
 # ---------------------------------------------------------------------------
 # DDL — creates schema + tables if they don't already exist
@@ -418,6 +421,22 @@ def main() -> None:
             except Exception as e:
                 print("Error during snapshot export:", e)
                 raise
+
+            # ── Refresh move-stats (non-fatal) ──────────────────
+            try:
+                n_stats = refresh_poly_move_stats(cur)
+                print(f"refreshed polymarket.market_move_stats: {n_stats} rows upserted")
+            except Exception as e:
+                print(f"poly move stats refresh failed (non-fatal): {e}")
+
+            # ── Evaluate & send alerts (non-fatal) ────────────
+            try:
+                triggered = evaluate_alerts(cur)
+                if triggered:
+                    sent = send_triggered_alerts(triggered, cur)
+                    print(f"alerts: {len(triggered)} triggered, {sent} emails sent")
+            except Exception as e:
+                print(f"alert evaluation failed (non-fatal): {e}")
 
             print(f"OK: upserted {total_rows} markets, {len(seen_events)} events, run_id={run_id}")
 

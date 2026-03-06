@@ -416,6 +416,113 @@ def _query_global_6h_deltas(limit=9):
     return out
 
 
+def _query_biggest_moves(limit=50, hours=1, min_volume=0):
+    """Biggest movers scored by how unusual each move is.
+
+    Steps (all in one query):
+      1. Identify the latest snapshot and the comparison snapshot
+         ~`hours` hours ago (falls back to immediately-prior snap).
+      2. Join the two snapshots per market to get mid_now / mid_prev.
+      3. LEFT JOIN kalshi.market_move_stats for the baseline avg_move_24h.
+      4. Compute move_score = |move| / avg_move_24h.
+         If stats are missing, move_score is NULL and we fall back to
+         sorting by abs_move so the endpoint always returns data.
+    """
+    limit = max(1, min(int(limit), 200))
+    hours = max(1, min(int(hours), 168))
+    min_volume = max(0, int(min_volume))
+
+    sql = f"""
+        WITH snaps AS (
+            SELECT DISTINCT snap_ts
+            FROM   kalshi.market_snapshot_markets
+        ),
+        latest AS (
+            SELECT MAX(snap_ts) AS snap_ts FROM snaps
+        ),
+        base AS (
+            SELECT COALESCE(
+                (
+                    SELECT snap_ts
+                    FROM   snaps
+                    WHERE  snap_ts <= (SELECT snap_ts FROM latest)
+                                      - INTERVAL '{hours} hours'
+                    ORDER  BY snap_ts DESC
+                    LIMIT  1
+                ),
+                (
+                    SELECT snap_ts
+                    FROM   snaps
+                    WHERE  snap_ts < (SELECT snap_ts FROM latest)
+                    ORDER  BY snap_ts DESC
+                    LIMIT  1
+                )
+            ) AS snap_ts
+        ),
+        pairs AS (
+            SELECT
+                l.market_ticker,
+                l.mid                       AS mid_now,
+                p.mid                       AS mid_prev,
+                (l.mid - p.mid)             AS move,
+                ABS(l.mid - p.mid)          AS abs_move,
+                l.volume,
+                l.open_interest,
+                l.spread_ticks
+            FROM kalshi.market_snapshot_markets l
+            JOIN base b ON TRUE
+            JOIN kalshi.market_snapshot_markets p
+              ON p.snap_ts       = b.snap_ts
+             AND p.market_ticker = l.market_ticker
+            WHERE l.snap_ts = (SELECT snap_ts FROM latest)
+              AND l.mid IS NOT NULL
+              AND p.mid IS NOT NULL
+        )
+        SELECT
+            pa.market_ticker,
+            om.title,
+            pa.mid_now,
+            pa.mid_prev,
+            pa.move,
+            pa.abs_move,
+            CASE WHEN ms.avg_move_24h IS NOT NULL AND ms.avg_move_24h > 0
+                 THEN ROUND(pa.abs_move / ms.avg_move_24h, 4)
+            END                             AS move_score,
+            ms.avg_move_24h,
+            pa.volume,
+            pa.open_interest,
+            pa.spread_ticks
+        FROM pairs pa
+        LEFT JOIN kalshi.market_move_stats ms
+          ON ms.market_ticker = pa.market_ticker
+        LEFT JOIN kalshi.open_markets om
+          ON om.market_ticker = pa.market_ticker
+        WHERE pa.volume >= {min_volume}
+        ORDER BY
+            move_score DESC NULLS LAST,
+            pa.abs_move DESC
+        LIMIT {limit}
+    """
+
+    rows = _run_query(sql)
+    cols = [
+        "market_ticker", "title",
+        "mid_now", "mid_prev", "move", "abs_move",
+        "move_score", "avg_move_24h",
+        "volume", "open_interest", "spread_ticks",
+    ]
+    out = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        for k in ("mid_now", "mid_prev", "move", "abs_move",
+                   "move_score", "avg_move_24h",
+                   "volume", "open_interest", "spread_ticks"):
+            if d.get(k) is not None:
+                d[k] = float(d[k])
+        out.append(d)
+    return out
+
+
 def _query_market_movers(limit=100, min_diff=25):
     """Return markets with large price moves between latest and ~24h-ago snapshots."""
     limit = max(1, min(int(limit), 500))
@@ -1107,4 +1214,25 @@ def vol_index_global(
         return _query_global_vol_index(points, min_open_interest)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"global-vol-index failed: {e}")
+
+
+# ── Biggest-Movers Signal Engine ─────────────────────────────
+
+@app.get("/signals/biggest-moves")
+@app.get("/signals/biggest_moves", include_in_schema=False)
+def biggest_moves(
+    limit: int = Query(50, ge=1, le=200),
+    hours: int = Query(1, ge=1, le=168),
+    min_volume: int = Query(0, ge=0),
+):
+    """Top markets by move_score = |Δmid| / avg_move_24h.
+
+    Falls back to raw abs_move ranking when market_move_stats
+    has not been populated yet (the table may not exist or may
+    be empty on first deploy).
+    """
+    try:
+        return _query_biggest_moves(limit, hours, min_volume)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"signals/biggest-moves failed: {e}")
 

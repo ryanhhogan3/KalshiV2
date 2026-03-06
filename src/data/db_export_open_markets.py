@@ -6,6 +6,9 @@ from typing import Any, Dict, Iterable, List
 
 from src.data.overview.all_markets import OverviewAllMarkets
 from src.data.db_connect import connect
+from src.data.refresh_move_stats import refresh_move_stats
+from src.data.alerts import evaluate_alerts
+from src.data.alert_email import send_triggered_alerts
 
 DDL = """
 create schema if not exists kalshi;
@@ -364,6 +367,22 @@ def main():
         except Exception as e:
           print("Error during snapshot export:", e)
           raise
+
+        # ── Refresh move-stats (non-fatal) ──────────────────
+        try:
+          n_stats = refresh_move_stats(cur)
+          print(f"refreshed market_move_stats: {n_stats} rows upserted")
+        except Exception as e:
+          print(f"move stats refresh failed (non-fatal): {e}")
+
+        # ── Evaluate & send alerts (non-fatal) ────────────
+        try:
+          triggered = evaluate_alerts(cur)
+          if triggered:
+            sent = send_triggered_alerts(triggered, cur)
+            print(f"alerts: {len(triggered)} triggered, {sent} emails sent")
+        except Exception as e:
+          print(f"alert evaluation failed (non-fatal): {e}")
 
         print(f"OK: upserted {total_rows} markets total, run_id={run_id}")
 

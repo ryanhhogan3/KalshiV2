@@ -462,6 +462,110 @@ def _query_expiring_markets(hours: int = 48, limit: int = 50):
     return out
 
 
+def _query_biggest_moves(limit=50, hours=1, min_volume=0):
+    """Biggest movers scored by how unusual each move is.
+
+    Polymarket version: uses outcome_yes_price as the price metric
+    and condition_id as the market key. Moves are in price units
+    (e.g. 0.05 = 5 percentage points).
+
+    LEFT JOINs polymarket.market_move_stats for the baseline.
+    Falls back to abs_move if stats haven't been populated yet.
+    """
+    limit = max(1, min(int(limit), 200))
+    hours = max(1, min(int(hours), 168))
+    min_volume = max(0, float(min_volume))
+
+    sql = f"""
+        WITH snaps AS (
+            SELECT DISTINCT snap_ts
+            FROM   polymarket.market_snapshot_markets
+        ),
+        latest AS (
+            SELECT MAX(snap_ts) AS snap_ts FROM snaps
+        ),
+        base AS (
+            SELECT COALESCE(
+                (
+                    SELECT snap_ts
+                    FROM   snaps
+                    WHERE  snap_ts <= (SELECT snap_ts FROM latest)
+                                      - INTERVAL '{hours} hours'
+                    ORDER  BY snap_ts DESC
+                    LIMIT  1
+                ),
+                (
+                    SELECT snap_ts
+                    FROM   snaps
+                    WHERE  snap_ts < (SELECT snap_ts FROM latest)
+                    ORDER  BY snap_ts DESC
+                    LIMIT  1
+                )
+            ) AS snap_ts
+        ),
+        pairs AS (
+            SELECT
+                l.condition_id,
+                l.outcome_yes_price                                      AS price_now,
+                p.outcome_yes_price                                      AS price_prev,
+                (l.outcome_yes_price - p.outcome_yes_price)              AS move,
+                ABS(l.outcome_yes_price - p.outcome_yes_price)           AS abs_move,
+                l.volume,
+                l.liquidity
+            FROM polymarket.market_snapshot_markets l
+            JOIN base b ON TRUE
+            JOIN polymarket.market_snapshot_markets p
+              ON p.snap_ts      = b.snap_ts
+             AND p.condition_id = l.condition_id
+            WHERE l.snap_ts = (SELECT snap_ts FROM latest)
+              AND l.outcome_yes_price IS NOT NULL
+              AND p.outcome_yes_price IS NOT NULL
+        )
+        SELECT
+            pa.condition_id,
+            om.question,
+            om.category,
+            pa.price_now,
+            pa.price_prev,
+            pa.move,
+            pa.abs_move,
+            CASE WHEN ms.avg_move_24h IS NOT NULL AND ms.avg_move_24h > 0
+                 THEN ROUND(pa.abs_move / ms.avg_move_24h, 4)
+            END                             AS move_score,
+            ms.avg_move_24h,
+            pa.volume,
+            pa.liquidity
+        FROM pairs pa
+        LEFT JOIN polymarket.market_move_stats ms
+          ON ms.condition_id = pa.condition_id
+        LEFT JOIN polymarket.open_markets om
+          ON om.condition_id = pa.condition_id
+        WHERE COALESCE(pa.volume, 0) >= {min_volume}
+        ORDER BY
+            move_score DESC NULLS LAST,
+            pa.abs_move DESC
+        LIMIT {limit}
+    """
+
+    rows = _run_query(sql)
+    cols = [
+        "condition_id", "question", "category",
+        "price_now", "price_prev", "move", "abs_move",
+        "move_score", "avg_move_24h",
+        "volume", "liquidity",
+    ]
+    out = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        for k in ("price_now", "price_prev", "move", "abs_move",
+                   "move_score", "avg_move_24h",
+                   "volume", "liquidity"):
+            if d.get(k) is not None:
+                d[k] = float(d[k])
+        out.append(d)
+    return out
+
+
 def _query_mid_moves(hours: int = 24, limit: int = 100):
     """
     Markets with the largest price moves over the lookback window.
@@ -912,3 +1016,23 @@ def vol_index_global(
         return _query_vol_index_global(points, min_liquidity)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"vol-index-global failed: {e}")
+
+
+# ── Biggest-Movers Signal Engine ─────────────────────────────
+
+@app.get("/signals/biggest-moves")
+@app.get("/signals/biggest_moves", include_in_schema=False)
+def biggest_moves(
+    limit: int = Query(50, ge=1, le=200),
+    hours: int = Query(1, ge=1, le=168),
+    min_volume: float = Query(0, ge=0),
+):
+    """Top markets by move_score = |Δprice| / avg_move_24h.
+
+    Falls back to raw abs_move ranking when market_move_stats
+    has not been populated yet.
+    """
+    try:
+        return _query_biggest_moves(limit, hours, min_volume)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"signals/biggest-moves failed: {e}")
