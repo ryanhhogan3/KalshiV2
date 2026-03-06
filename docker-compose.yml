@@ -1,99 +1,96 @@
 services:
-  kalshiv2:
-    build: .
-    container_name: kalshiv2
-    restart: always
-    environment:
-      DB_HOST: db
-      DB_PORT: "5432"
-      DB_NAME: shift
-      DB_USER: shift_user
-      DB_PASS: change_me_strong_password
-      DB_SSLMODE: disable
-      ENABLE_MARKET_SNAPSHOT: "1"
-    # If your exporter/auth needs the Kalshi private key, mount it read-only:
-    # (Make sure this file exists on the EC2 host)
-    volumes:
-      - /home/ubuntu/apps/KalshiV2/src/auth/secrets/kalshi_private_key.pem:/app/src/auth/secrets/kalshi_private_key.pem:ro
-    command: ["sleep", "infinity"]
-    networks:
-      - shift_net
 
-  polymarket:
-    build: .
-    container_name: polymarket_exporter
-    restart: always
-    environment:
-      DB_HOST: db
-      DB_PORT: "5432"
-      DB_NAME: shift
-      DB_USER: shift_user
-      DB_PASS: change_me_strong_password
-      DB_SSLMODE: disable
-      EXPORT_SOURCE: ec2
-      # Set to "1" to also write per-market time-series rows
-      ENABLE_MARKET_SNAPSHOT: "1"
-    command: ["sleep", "infinity"]
-    networks:
-      - shift_net
-
+  # ── Kalshi API (always-on, behind nginx) ──────────────
   api:
-    build:
-      context: /home/ubuntu/apps/KalshiV2-api
+    build: .
     container_name: kalshi_scrapper_api
     restart: always
+    env_file:
+      - .env
     environment:
+      PYTHONPATH: /app
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: shift
       DB_USER: shift_user
-      DB_PASS: change_me_strong_password
+      DB_PASS: ${DB_PASS:-change_me_strong_password}
       DB_SSLMODE: disable
-      # If you want to override CORS later:
-      # ALLOWED_ORIGINS: "https://predictionshift.com,http://localhost:5173,http://localhost:3000"
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      ALERT_FROM_EMAIL: ${ALERT_FROM_EMAIL:-}
+      ALERT_DRY_RUN: ${ALERT_DRY_RUN:-1}
     ports:
       - "127.0.0.1:8000:8000"
     command: ["uvicorn", "src.api.kalshi_api:app", "--host", "0.0.0.0", "--port", "8000"]
     networks:
-    - shift_net
+      - shift_net
 
+  # ── Polymarket API (always-on, behind nginx) ──────────
   poly_api:
-    build:
-      context: /home/ubuntu/apps/KalshiV2-api
+    build: .
     container_name: poly_api
     restart: always
+    env_file:
+      - .env
     environment:
+      PYTHONPATH: /app
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: shift
       DB_USER: shift_user
-      DB_PASS: change_me_strong_password
+      DB_PASS: ${DB_PASS:-change_me_strong_password}
       DB_SSLMODE: disable
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      ALERT_FROM_EMAIL: ${ALERT_FROM_EMAIL:-}
+      ALERT_DRY_RUN: ${ALERT_DRY_RUN:-1}
     ports:
       - "127.0.0.1:8001:8001"
     command: ["uvicorn", "src.api.poly_api:app", "--host", "0.0.0.0", "--port", "8001", "--root-path", "/poly"]
     networks:
       - shift_net
 
+  # ── Kalshi Exporter (cron-triggered, exits after run) ─
   kalshi_export:
-    image: kalshiv2:prod
+    build: .
     env_file:
       - .env
     environment:
       PYTHONPATH: /app
       ENABLE_MARKET_SNAPSHOT: "1"
+      EXPORT_SOURCE: ec2
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: shift
+      DB_USER: shift_user
+      DB_PASS: ${DB_PASS:-change_me_strong_password}
+      DB_SSLMODE: disable
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      ALERT_FROM_EMAIL: ${ALERT_FROM_EMAIL:-}
+      ALERT_DRY_RUN: ${ALERT_DRY_RUN:-1}
+    volumes:
+      - /home/ubuntu/apps/KalshiV2/src/auth/secrets/kalshi_private_key.pem:/app/src/auth/secrets/kalshi_private_key.pem:ro
     command: ["python", "-m", "src.data.db_export_open_markets"]
     restart: "no"
     networks:
       - shift_net
 
+  # ── Polymarket Exporter (cron-triggered, exits after run)
   poly_export:
-    image: kalshiv2:prod
+    build: .
     env_file:
       - .env
     environment:
       PYTHONPATH: /app
       ENABLE_MARKET_SNAPSHOT: "1"
+      EXPORT_SOURCE: ec2
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: shift
+      DB_USER: shift_user
+      DB_PASS: ${DB_PASS:-change_me_strong_password}
+      DB_SSLMODE: disable
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      ALERT_FROM_EMAIL: ${ALERT_FROM_EMAIL:-}
+      ALERT_DRY_RUN: ${ALERT_DRY_RUN:-1}
     command: ["python", "-m", "src.data.db_export_poly_markets"]
     restart: "no"
     networks:
